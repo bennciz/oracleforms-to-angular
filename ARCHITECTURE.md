@@ -43,6 +43,39 @@ idempotently:
 (`RetrieveAndGenerate`) — e.g. "what is the line-total formula?" returns the recovered
 `nvl(qty,0)*nvl(unit_price,0)` with a source reference.
 
+#### What actually goes into the Knowledge Base
+
+The KB is indexed on the **recovered rules and schema — not the raw `.fmb` binaries.**
+`build_corpus.py` emits four Markdown document types, uploaded to S3 as the KB data source:
+
+| Corpus document | Contents |
+|-----------------|----------|
+| `form_<name>.md` (one per form) | Each trigger + reconstructed PL/SQL + the tables/sequences/items it touches |
+| `business_rules.md` | The recovered business rules — the key logic triggers (`WHEN-VALIDATE-ITEM`, `ON-CHECK-DELETE-MASTER`, `PRE-INSERT`, `ON-POPULATE-DETAILS`, `POST-INSERT`, `WHEN-VALIDATE-RECORD`), each with a plain-language **Intent** line and the actual PL/SQL |
+| `dependency_map.md` | Form→form navigation, data access, foreign keys |
+| `data_schema.md` | Tables, columns, keys |
+
+A stored `business_rules.md` chunk looks like this (note: the PL/SQL is shown inline to avoid
+nested code fences):
+
+```
+## ORDERS — ON-CHECK-DELETE-MASTER (ORDERS)
+Intent: Enforces a referential/validation rule and blocks the operation on failure.
+PL/SQL: ... Message('Cannot delete master record when matching detail records exist.');
+             RAISE Form_Trigger_Failure; ...
+```
+
+Bedrock KB embeds these chunks with **Amazon Titan Text Embeddings v2** (1024-dim) and stores
+the vectors in **OpenSearch Serverless**, so a query like *"what is the delete rule for
+orders?"* retrieves that exact rule with a citation.
+
+> **On the intent summaries:** the `Intent:` line is derived **heuristically** in
+> `build_corpus.py` by pattern-matching the trigger body (e.g. `NEXTVAL` → sequence primary
+> key, `:=` with `*` → computed total). It is a retrieval aid, **not** an authoritative spec —
+> the authoritative content is the verbatim PL/SQL that sits beside it.
+
+![What goes into the Knowledge Base](docs/knowledge-base-corpus.svg)
+
 **Gotchas baked in:** Claude requires an **inference-profile** ARN (a bare model id returns
 "on-demand throughput isn't supported"); the collection takes ~5 min to become active before
 the KB can be created.

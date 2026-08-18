@@ -48,6 +48,41 @@ par écran, plus des docs sur les règles métier, la carte des dépendances et 
 (`RetrieveAndGenerate`) — p. ex. « quelle est la formule du total de ligne ? » retourne le
 `nvl(qty,0)*nvl(unit_price,0)` récupéré avec une référence de source.
 
+#### Ce qui se retrouve réellement dans la base de connaissances
+
+La base de connaissances est indexée sur les **règles récupérées et le schéma — et non les binaires `.fmb`
+bruts.** `build_corpus.py` produit quatre types de documents Markdown, téléversés dans S3 comme source de
+données de la base de connaissances :
+
+| Document du corpus | Contenu |
+|--------------------|---------|
+| `form_<name>.md` (un par formulaire) | Chaque déclencheur + PL/SQL reconstruit + les tables/séquences/items qu'il touche |
+| `business_rules.md` | Les règles métier récupérées — les déclencheurs de logique clés (`WHEN-VALIDATE-ITEM`, `ON-CHECK-DELETE-MASTER`, `PRE-INSERT`, `ON-POPULATE-DETAILS`, `POST-INSERT`, `WHEN-VALIDATE-RECORD`), chacun avec une ligne **Intent** en langage clair et le PL/SQL réel |
+| `dependency_map.md` | Navigation formulaire→formulaire, accès aux données, clés étrangères |
+| `data_schema.md` | Tables, colonnes, clés |
+
+Un extrait de `business_rules.md` stocké ressemble à ceci (remarque : le PL/SQL est affiché en ligne pour
+éviter les blocs de code imbriqués) :
+
+```
+## ORDERS — ON-CHECK-DELETE-MASTER (ORDERS)
+Intent: Enforces a referential/validation rule and blocks the operation on failure.
+PL/SQL: ... Message('Cannot delete master record when matching detail records exist.');
+             RAISE Form_Trigger_Failure; ...
+```
+
+Bedrock KB intègre ces extraits avec **Amazon Titan Text Embeddings v2** (1024 dim) et stocke les vecteurs
+dans **OpenSearch Serverless**, de sorte qu'une requête telle que *« quelle est la règle de suppression
+pour les commandes ? »* retrouve cette règle précise avec une citation.
+
+> **À propos des résumés d'intention :** la ligne `Intent:` est dérivée **heuristiquement** dans
+> `build_corpus.py` par correspondance de motifs dans le corps du déclencheur (p. ex. `NEXTVAL` →
+> clé primaire séquentielle, `:=` avec `*` → total calculé). Il s'agit d'une aide à la recherche,
+> **non** d'une spécification faisant autorité — le contenu faisant autorité est le PL/SQL verbatim
+> qui l'accompagne.
+
+![What goes into the Knowledge Base](docs/knowledge-base-corpus.svg)
+
 **Points d'attention intégrés :** Claude exige un ARN de **profil d'inférence** (un identifiant de
 modèle brut retourne « on-demand throughput isn't supported ») ; la collection prend ~5 min pour
 devenir active avant que la KB puisse être créée.

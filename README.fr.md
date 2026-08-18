@@ -47,7 +47,7 @@ l'ensemble du pipeline soit reproductible par n'importe qui.
 | Étape | Service(s) | Description |
 |-------|------------|-------------|
 | **1 · Analyser** | AWS Lambda (conteneur) | Analyse les binaires Oracle Forms `.fmb` et l'export APEX en JSON ; construit un graphe de dépendances et récupère les règles métier. Python pur — sans IA, fonctionne partout. |
-| **2 · Base de connaissances** | Amazon Bedrock Knowledge Bases · Amazon OpenSearch Serverless · Amazon Titan Text Embeddings v2 | Construit un corpus optimisé pour la recherche à partir des règles récupérées et l'indexe pour le RAG. Les développeurs l'interrogent avec citations à l'appui. |
+| **2 · Base de connaissances** | Amazon Bedrock Knowledge Bases · Amazon OpenSearch Serverless · Amazon Titan Text Embeddings v2 | Convertit les règles récupérées en un corpus Markdown — docs par formulaire, **règles métier (intention + PL/SQL)**, carte des dépendances et schéma (**pas** le `.fmb` brut) — les intègre avec Titan v2, et les indexe dans OpenSearch Serverless pour le RAG avec citations. Voir [ARCHITECTURE](ARCHITECTURE.fr.md#ce-qui-se-retrouve-réellement-dans-la-base-de-connaissances). |
 | **3 · Générer** | Amazon Bedrock (Anthropic Claude) | Génère les composants Angular, une API .NET, une spécification OpenAPI et des tests — un fichier par appel afin d'éviter la troncature — chaque règle récupérée étant tracée dans la sortie. |
 | **4 · Valider** | AWS Lambda · `pytest` généré | Exécute des tests d'équivalence comportementale. Un **mode shadow** optionnel soumet les mêmes entrées au système hérité et à l'API moderne, puis compare chaque décision. |
 

@@ -46,7 +46,7 @@ anyone.
 | Stage | Service(s) | What it does |
 |------|------------|--------------|
 | **1 · Parse** | AWS Lambda (container) | Parses Oracle Forms `.fmb` binaries and the APEX export into JSON; builds a dependency graph and recovers business rules. Pure Python — no AI, runs anywhere. |
-| **2 · Knowledge Base** | Amazon Bedrock Knowledge Bases · Amazon OpenSearch Serverless · Amazon Titan Text Embeddings v2 | Builds a retrieval-optimized corpus from the recovered rules and indexes it for RAG. Developers query it with citations. |
+| **2 · Knowledge Base** | Amazon Bedrock Knowledge Bases · Amazon OpenSearch Serverless · Amazon Titan Text Embeddings v2 | Turns the recovered rules into a Markdown corpus — per-form docs, **business rules (intent + PL/SQL)**, dependency map, and schema (**not** the raw `.fmb`) — embeds it with Titan v2, and indexes it in OpenSearch Serverless for RAG with citations. See [ARCHITECTURE](ARCHITECTURE.md#what-actually-goes-into-the-knowledge-base). |
 | **3 · Generate** | Amazon Bedrock (Anthropic Claude) | Generates Angular components, a .NET API, an OpenAPI spec, and tests — one file per call to avoid truncation — each recovered rule traced into the output. |
 | **4 · Validate** | AWS Lambda · generated `pytest` | Runs behavioural-equivalence tests. An optional **shadow mode** runs the same inputs through the legacy system and the modern API and diffs every decision. |
 

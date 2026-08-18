@@ -36,11 +36,11 @@ l'ensemble du pipeline soit reproductible par n'importe qui.
 
 **Pipeline de migration GenAI**
 
-![GenAI migration pipeline](docs/architecture-pipeline.svg)
+[![GenAI migration pipeline](docs/architecture-pipeline.svg)](https://raw.githubusercontent.com/bennciz/oracleforms-to-angular/main/docs/architecture-pipeline.svg)
 
 **Architecture cible « après »**
 
-![Target architecture](docs/architecture-target.svg)
+[![Target architecture](docs/architecture-target.svg)](https://raw.githubusercontent.com/bennciz/oracleforms-to-angular/main/docs/architecture-target.svg)
 
 ## Fonctionnement
 
@@ -124,10 +124,19 @@ pipeline/            The GenAI migration pipeline (the star of the sample)
 app/
   angular_app/       Modern "after" SPA (Accounts + Reports screens)
   dotnet_api/        .NET 8 API (thin gateway over Oracle via Dapper)
-infrastructure/cdk/  AWS CDK (Python) — all stacks above
+infrastructure/
+  cdk/               AWS CDK (Python) — all stacks above
+  pipeline/          The same pipeline steps as AWS Lambda container images,
+                     orchestrated by Step Functions (deployed by PipelineStack)
 scripts/             deploy-all.sh / .ps1, cleanup.sh
 docs/                Architecture diagrams
 ```
+
+> **Deux vues du pipeline.** `pipeline/` est la version à exécuter et à lire — du Python simple que
+> vous pouvez exécuter étape par étape sur `sample-inputs/` pour comprendre chaque étape.
+> `infrastructure/pipeline/` regroupe les *mêmes* étapes sous forme d'images de conteneur AWS Lambda
+> qu'AWS CDK déploie derrière AWS Step Functions (`PipelineStack`) pour l'exécution orchestrée
+> native sur le cloud.
 
 ## Sécurité
 
@@ -162,8 +171,13 @@ avez terminé.
 - **Bedrock « model identifier is invalid » / on-demand not supported** — utilisez un ARN de
   **profil d'inférence** (p. ex. `us.anthropic.claude-...`), et non un identifiant de modèle
   brut, et activez le modèle dans votre région.
-- **OpenSearch Serverless 401 lors de l'ingestion de la KB** — vérifiez la **politique réseau**
-  de la collection (`AllowFromPublic`) et les principaux de la politique d'accès aux données.
+- **OpenSearch Serverless 401 / délai dépassé lors de l'ingestion de la KB** — la collection est
+  **accessible uniquement via un point de terminaison VPC** (l'accès public est désactivé).
+  Vérifiez que le **point de terminaison VPC AOSS** (`KB_VPC_ENDPOINT_ID`) existe, qu'il figure
+  dans le champ `SourceVPCEs` de la politique réseau de la collection, et que l'appelant (Lambda,
+  script local, etc.) s'exécute dans le VPC ou transite par ce point de terminaison. Confirmez
+  également que la politique d'accès aux données liste les bons principaux (le rôle IAM de la KB
+  et l'identité de l'appelant). N'activez **pas** l'accès public comme solution de contournement.
 - **Page blanche Angular (NG0908)** — assurez-vous que les options de construction dans
   `angular.json` incluent `"polyfills": ["zone.js"]`.
 - **Erreurs de contenu mixte / CORS** — confirmez que CloudFront proxifie `/api/*` vers l'ALB

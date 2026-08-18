@@ -81,7 +81,11 @@ class NetworkStack(Stack):
         self.ecs_api_sg.add_ingress_rule(
             self.alb_sg, ec2.Port.tcp(8080), ".NET API from ALB")
         self.alb_sg.add_ingress_rule(
-            ec2.Peer.any_ipv4(), ec2.Port.tcp(80), "HTTP from anywhere (POC)")
+            ec2.Peer.any_ipv4(), ec2.Port.tcp(443), "HTTPS from anywhere")
+        # Port 80 is kept open only to serve the HTTP→HTTPS redirect listener;
+        # it does not carry application traffic.
+        self.alb_sg.add_ingress_rule(
+            ec2.Peer.any_ipv4(), ec2.Port.tcp(80), "HTTP redirect to HTTPS")
 
         # --- VPC endpoints ---------------------------------------------------
         # Gateway endpoint for S3 (free, avoids NAT for artifact traffic).

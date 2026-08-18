@@ -35,11 +35,11 @@ anyone.
 
 **GenAI migration pipeline**
 
-![GenAI migration pipeline](docs/architecture-pipeline.svg)
+[![GenAI migration pipeline](docs/architecture-pipeline.svg)](https://raw.githubusercontent.com/bennciz/oracleforms-to-angular/main/docs/architecture-pipeline.svg)
 
 **Target "after" architecture**
 
-![Target architecture](docs/architecture-target.svg)
+[![Target architecture](docs/architecture-target.svg)](https://raw.githubusercontent.com/bennciz/oracleforms-to-angular/main/docs/architecture-target.svg)
 
 ## How It Works
 
@@ -121,10 +121,18 @@ pipeline/            The GenAI migration pipeline (the star of the sample)
 app/
   angular_app/       Modern "after" SPA (Accounts + Reports screens)
   dotnet_api/        .NET 8 API (thin gateway over Oracle via Dapper)
-infrastructure/cdk/  AWS CDK (Python) — all stacks above
+infrastructure/
+  cdk/               AWS CDK (Python) — all stacks above
+  pipeline/          The same pipeline steps as AWS Lambda container images,
+                     orchestrated by Step Functions (deployed by PipelineStack)
 scripts/             deploy-all.sh / .ps1, cleanup.sh
 docs/                Architecture diagrams
 ```
+
+> **Two views of the pipeline.** `pipeline/` is the run-it-and-read-it version — plain Python you
+> can execute stage-by-stage over `sample-inputs/` to understand each step. `infrastructure/pipeline/`
+> is the *same* steps packaged as Lambda container images that AWS CDK deploys behind AWS Step
+> Functions (`PipelineStack`) for the cloud-native, orchestrated run.
 
 ## Security
 
@@ -155,8 +163,12 @@ continuous cost), **Bedrock** inference (per token), **ECS Fargate**, **EC2** (O
 - **Bedrock "model identifier is invalid" / on-demand not supported** — use an **inference
   profile** ARN (e.g. `us.anthropic.claude-...`), not a bare model id, and enable the model in
   your region.
-- **OpenSearch Serverless 401 on KB ingestion** — check the collection's **network policy**
-  (`AllowFromPublic`) and data-access policy principals.
+- **OpenSearch Serverless 401 / timeout on KB ingestion** — the collection is
+  **VPC-endpoint-scoped** (public access is disabled). Verify that the AOSS **VPC endpoint**
+  (`KB_VPC_ENDPOINT_ID`) exists, is listed in the collection's network-policy `SourceVPCEs`,
+  and that the caller (Lambda, local script, etc.) runs inside the VPC or routes through that
+  endpoint. Also confirm the data-access policy lists the correct principals (the KB IAM role
+  and your caller identity). Do **not** enable public access as a workaround.
 - **Angular blank page (NG0908)** — ensure `angular.json` build options include
   `"polyfills": ["zone.js"]`.
 - **Mixed-content / CORS errors** — confirm CloudFront is proxying `/api/*` to the ALB and the

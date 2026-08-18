@@ -16,7 +16,9 @@ The .NET Reports API is generic + config-driven and already deployed, so a NEW
 report goes live with NO backend rollout — the pipeline just registers a row and
 ships the front end. Deterministic: same page in -> same result out, every run.
 """
-import argparse, base64, json, os, re, sys, time
+import argparse, base64, json, os, re, subprocess, sys, time
+import urllib.request
+from urllib.parse import urlparse
 import boto3
 from botocore.config import Config
 
@@ -84,22 +86,22 @@ def main():
     # Base64-encode the SQL INSIDE Oracle so tabs/newlines/line-wrapping can't
     # corrupt it in transit through SQL*Plus text output. Chunk the CLOB to stay
     # under SQL*Plus's line limits, then reassemble + b64-decode here.
-    meta=oracle(f"""ALTER SESSION SET CONTAINER=XEPDB1;
-set feedback off pages 0 lines 200 long 100000 longchunksize 80 trimspool on serveroutput on
-SELECT '@@NAME@@'||page_name FROM apex_application_pages WHERE application_id={APP_ID} AND page_id={PAGE} AND rownum=1;
-DECLARE
-  s CLOB; b CLOB; i PLS_INTEGER := 1; step PLS_INTEGER := 60;
-BEGIN
-  SELECT region_source INTO s FROM apex_application_page_regions
-   WHERE application_id={APP_ID} AND page_id={PAGE} AND source_type='Interactive Report' AND rownum=1;
-  b := UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE(UTL_RAW.CAST_TO_RAW(s)));
-  b := REPLACE(REPLACE(b, CHR(13)), CHR(10));  -- drop Oracle's per-64 newlines FIRST
-  WHILE i <= LENGTH(b) LOOP
-    DBMS_OUTPUT.PUT_LINE('@@B64@@'||SUBSTR(b,i,step)); i := i + step;
-  END LOOP;
-END;
-/
-""")
+    meta=oracle(
+        f"ALTER SESSION SET CONTAINER=XEPDB1;\n"  # nosec B608 - APP_ID is a hardcoded constant (100); PAGE is validated as int by argparse; neither is user-controlled string data
+        "set feedback off pages 0 lines 200 long 100000 longchunksize 80 trimspool on serveroutput on\n"
+        f"SELECT '@@NAME@@'||page_name FROM apex_application_pages WHERE application_id={APP_ID} AND page_id={PAGE} AND rownum=1;\n"
+        "DECLARE\n"
+        "  s CLOB; b CLOB; i PLS_INTEGER := 1; step PLS_INTEGER := 60;\n"
+        "BEGIN\n"
+        f"  SELECT region_source INTO s FROM apex_application_page_regions\n"
+        f"   WHERE application_id={APP_ID} AND page_id={PAGE} AND source_type='Interactive Report' AND rownum=1;\n"
+        "  b := UTL_RAW.CAST_TO_VARCHAR2(UTL_ENCODE.BASE64_ENCODE(UTL_RAW.CAST_TO_RAW(s)));\n"
+        "  b := REPLACE(REPLACE(b, CHR(13)), CHR(10));  -- drop Oracle's per-64 newlines FIRST\n"
+        "  WHILE i <= LENGTH(b) LOOP\n"
+        "    DBMS_OUTPUT.PUT_LINE('@@B64@@'||SUBSTR(b,i,step)); i := i + step;\n"
+        "  END LOOP;\n"
+        "END;\n"
+        "/\n")
     name=""
     for line in meta.splitlines():
         if "@@NAME@@" in line: name=line.split("@@NAME@@",1)[1].strip()
@@ -120,10 +122,11 @@ END;
     base_sql=re.sub(r"(?is)\s+where\s+:P\d+_\w+\s*=\s*'[^']*'\s*$","",base_sql)
     base_sql=re.sub(r"(?i):P\d+_\w+","NULL",base_sql)  # any remaining binds -> NULL
     base_sql=base_sql.strip().rstrip(";")
-    cols=oracle(f"""ALTER SESSION SET CONTAINER=XEPDB1;
-set feedback off pages 0 lines 200
-SELECT column_alias||'|'||report_label FROM apex_application_page_ir_col
- WHERE application_id={APP_ID} AND page_id={PAGE} ORDER BY display_order;""")
+    cols=oracle(
+        f"ALTER SESSION SET CONTAINER=XEPDB1;\n"  # nosec B608 - APP_ID is a hardcoded constant (100); PAGE is validated as int by argparse; neither is user-controlled string data
+        "set feedback off pages 0 lines 200\n"
+        "SELECT column_alias||'|'||report_label FROM apex_application_page_ir_col\n"
+        f" WHERE application_id={APP_ID} AND page_id={PAGE} ORDER BY display_order;")
     column_pairs=[l.strip() for l in cols.splitlines() if "|" in l and "@@" not in l]
     ok(f"page “{name}” — {len(column_pairs)} columns")
     info(f"base SQL: {base_sql[:70].replace(chr(10),' ')}…")
@@ -166,9 +169,10 @@ SELECT column_alias||'|'||report_label FROM apex_application_page_ir_col
 
     # ---- Stage 3: VALIDATE (SQL runs, returns rows) ----
     stage(3,"VALIDATE","confirming the recovered SQL runs against Oracle")
-    cnt=oracle(f"""ALTER SESSION SET CONTAINER=XEPDB1;
-set feedback off pages 0 lines 60
-SELECT '@@N@@'||count(*) FROM ({base_sql});""")
+    cnt=oracle(
+        f"ALTER SESSION SET CONTAINER=XEPDB1;\n"  # nosec B608 - base_sql is read from Oracle's own APEX application-metadata catalog via a privileged sqlplus session; it is not user-controlled input and a full SQL statement cannot be parameterized
+        "set feedback off pages 0 lines 60\n"
+        f"SELECT '@@N@@'||count(*) FROM ({base_sql});")
     n=next((l.split("@@N@@",1)[1].strip() for l in cnt.splitlines() if "@@N@@" in l),"?")
     if n=="?" or not n.isdigit(): fail(f"SQL did not return a count: {cnt[-200:]}"); sys.exit(1)
     ok(f"SQL valid — {n} rows")
@@ -177,29 +181,34 @@ SELECT '@@N@@'||count(*) FROM ({base_sql});""")
     stage(4,"DEPLOY","registering the report (instant) + shipping the Angular grid")
     sql_esc=base_sql.replace("'","''")
     cols_esc=json.dumps(parsed).replace("'","''")
-    reg=oracle(f"""ALTER SESSION SET CONTAINER=XEPDB1;
-set feedback on
-MERGE INTO app_data.report_registry t
-USING (SELECT '{key}' rk FROM dual) s ON (t.report_key=s.rk)
-WHEN MATCHED THEN UPDATE SET title='{name}', base_sql='{sql_esc}', columns_json='{cols_esc}', source_page={PAGE}
-WHEN NOT MATCHED THEN INSERT (report_key,title,base_sql,columns_json,source_page)
-  VALUES ('{key}','{name}','{sql_esc}','{cols_esc}',{PAGE});
-COMMIT;
-SELECT '@@OK@@'||report_key FROM app_data.report_registry WHERE report_key='{key}';""")
+    name_esc=name.replace("'","''")  # single-quote-escape for SQL literal; sqlplus has no bind-variable protocol
+    reg=oracle(
+        f"ALTER SESSION SET CONTAINER=XEPDB1;\n"  # nosec B608 - key is regex-sanitised to [a-z0-9-]+; name/sql/cols are single-quote-escaped literals; PAGE is int; sqlplus has no bind-variable protocol
+        "set feedback on\n"
+        "MERGE INTO app_data.report_registry t\n"
+        f"USING (SELECT '{key}' rk FROM dual) s ON (t.report_key=s.rk)\n"
+        f"WHEN MATCHED THEN UPDATE SET title='{name_esc}', base_sql='{sql_esc}', columns_json='{cols_esc}', source_page={PAGE}\n"
+        "WHEN NOT MATCHED THEN INSERT (report_key,title,base_sql,columns_json,source_page)\n"
+        f"  VALUES ('{key}','{name_esc}','{sql_esc}','{cols_esc}',{PAGE});\n"
+        "COMMIT;\n"
+        f"SELECT '@@OK@@'||report_key FROM app_data.report_registry WHERE report_key='{key}';")
     if "@@OK@@" not in reg: fail(f"registry insert failed: {reg[-300:]}"); sys.exit(1)
     ok(f"registered report_key='{key}' (backend serves it immediately — no rollout)")
     if args.no_deploy:
         info("--no-deploy: skipping Angular ship"); done(key,name,PAGE,n); return
     info("building Angular + shipping to CloudFront…")
-    rc=os.system(f"bash {HERE}/../app/deploy_frontend.sh >/tmp/pipe_ng.log 2>&1")
-    if rc!=0: fail("Angular deploy failed — see /tmp/pipe_ng.log"); sys.exit(1)
+    _script=os.path.join(HERE,"..","app","deploy_frontend.sh")
+    with open("/tmp/pipe_ng.log","w") as _log:
+        _result=subprocess.run(["bash",_script],shell=False,stdout=_log,stderr=_log)
+    if _result.returncode!=0: fail("Angular deploy failed — see /tmp/pipe_ng.log"); sys.exit(1)
     ok("Angular shipped + CloudFront invalidated")
 
     # ---- Stage 5: SHADOW ----
     stage(5,"SHADOW","diffing the migrated API vs the live APEX report")
-    import urllib.request
-    api=json.load(urllib.request.urlopen(
-        f"https://{CF_DOMAIN}/api/reports/{key}",timeout=30))
+    _url=f"https://{CF_DOMAIN}/api/reports/{key}"
+    if urlparse(_url).scheme not in ("https","http"):
+        raise ValueError(f"Unsafe URL scheme in CF_DOMAIN: {_url}")
+    api=json.load(urllib.request.urlopen(_url,timeout=30))  # nosec B310 - scheme validated above
     api_rows=len(api.get("rows",[]))
     verdict="MATCH" if str(api_rows)==str(n) else "DIVERGE"
     (ok if verdict=="MATCH" else fail)(f"legacy APEX rows={n}  migrated API rows={api_rows}  → {verdict}")

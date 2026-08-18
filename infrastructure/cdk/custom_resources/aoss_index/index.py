@@ -11,6 +11,7 @@ Delete : drop the index (best-effort; never blocks stack deletion).
 """
 import json
 import time
+import urllib.parse
 import urllib.request
 
 import boto3
@@ -65,11 +66,14 @@ def _send(event, context, status, reason=""):
         "LogicalResourceId": event["LogicalResourceId"],
         "Data": {},
     }).encode("utf-8")
+    resp_url = event["ResponseURL"]
+    if urllib.parse.urlparse(resp_url).scheme not in ("https", "http"):
+        raise ValueError(f"Unsafe ResponseURL scheme: {resp_url}")
     req = urllib.request.Request(
-        event["ResponseURL"], data=body, method="PUT",
+        resp_url, data=body, method="PUT",
         headers={"content-type": "", "content-length": str(len(body))},
     )
-    urllib.request.urlopen(req)  # noqa: S310 (CFN-signed presigned S3 URL)
+    urllib.request.urlopen(req)  # nosec B310 - scheme validated above; ResponseURL is always an S3 presigned https URL provided by CloudFormation
 
 
 def handler(event, context):

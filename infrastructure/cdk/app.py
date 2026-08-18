@@ -50,8 +50,8 @@ database = DatabaseStack(
 )
 
 bedrock_kb = BedrockKbStack(
-    app, "BedrockKBStack", prefix=PREFIX, security=security, storage=storage,
-    env=ENV,
+    app, "BedrockKBStack", prefix=PREFIX, network=network, security=security,
+    storage=storage, env=ENV,
 )
 
 pipeline = PipelineStack(

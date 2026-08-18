@@ -16,6 +16,7 @@ from aws_cdk import (
     CfnOutput,
     CustomResource,
     Duration,
+    aws_ec2 as ec2,
     aws_opensearchserverless as aoss,
     aws_bedrock as bedrock,
     aws_iam as iam,
@@ -36,7 +37,7 @@ class BedrockKbStack(Stack):
     EMBED_DIMENSION = 1024
 
     def __init__(self, scope: Construct, cid: str, *, prefix: str,
-                 security, storage, **kwargs):
+                 network, security, storage, **kwargs):
         super().__init__(scope, cid, **kwargs)
         self.prefix = prefix
         collection_name = f"{prefix}-kb"
@@ -59,12 +60,45 @@ class BedrockKbStack(Stack):
             architecture=_lambda.Architecture.ARM_64,
             timeout=Duration.minutes(5),
             memory_size=512,
+            # Place the Lambda in the VPC so it reaches the AOSS collection
+            # exclusively through the private VPC endpoint (no public data plane).
+            vpc=network.vpc,
+            vpc_subnets=network.private_subnets,
+            security_groups=[network.lambda_sg],
         )
-        index_fn.add_to_role_policy(iam.PolicyStatement(
-            actions=["aoss:APIAccessAll"],
-            resources=[f"arn:aws:aoss:{region}:{acct}:collection/*"],
-        ))
+        # aoss:APIAccessAll is attached after self.collection is defined so
+        # the resource can be scoped to the specific collection ARN rather
+        # than collection/*.  See grant below.
         index_fn_role_arn = index_fn.role.role_arn
+
+        # --- AOSS VPC endpoint (private data plane access) --------------------
+        # A dedicated security group on the interface endpoint allows inbound
+        # HTTPS only from the pipeline Lambda SG, so the index-creator Lambda
+        # (and any future pipeline Lambda that calls AOSS directly) can reach
+        # the collection without traversing the public internet.
+        aoss_ep_sg = ec2.SecurityGroup(
+            self, "AossEndpointSg",
+            vpc=network.vpc,
+            security_group_name=f"{prefix}-aoss-ep-sg",
+            description="AOSS interface endpoint — HTTPS from pipeline Lambdas only",
+            allow_all_outbound=True,
+        )
+        aoss_ep_sg.add_ingress_rule(
+            network.lambda_sg,
+            ec2.Port.tcp(443),
+            "AOSS data-plane from index-creator Lambda",
+        )
+
+        vpce = aoss.CfnVpcEndpoint(
+            self, "KbAossVpce",
+            # Name must be ≤32 chars, lowercase, start with a letter.
+            name="oracle-mod-aoss-vpce",
+            vpc_id=network.vpc.vpc_id,
+            subnet_ids=network.vpc.select_subnets(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+            ).subnet_ids,
+            security_group_ids=[aoss_ep_sg.security_group_id],
+        )
 
         # --- OpenSearch Serverless security/network/data-access policies -----
         encryption_policy = aoss.CfnSecurityPolicy(
@@ -77,6 +111,10 @@ class BedrockKbStack(Stack):
                 "AWSOwnedKey": True,
             }),
         )
+        # Access is scoped to the VPC endpoint created above; public internet
+        # access is disabled. Amazon Bedrock Knowledge Base access to a
+        # private (VPC-only) AOSS collection depends on this network policy
+        # and should be validated on deploy to confirm ingestion still works.
         network_policy = aoss.CfnSecurityPolicy(
             self, "KbNetworkPolicy",
             name=f"{prefix}-net",
@@ -88,9 +126,13 @@ class BedrockKbStack(Stack):
                     {"ResourceType": "dashboard",
                      "Resource": [f"collection/{collection_name}"]},
                 ],
-                "AllowFromPublic": True,  # POC; tighten to VPC endpoint for prod
+                "AllowFromPublic": False,
+                "SourceVPCEs": [vpce.attr_id],
             }]),
         )
+        # The policy references vpce.attr_id, so it must not be created before
+        # the VPC endpoint is fully provisioned.
+        network_policy.add_dependency(vpce)
         data_access_policy = aoss.CfnAccessPolicy(
             self, "KbDataAccessPolicy",
             name=f"{prefix}-access",
@@ -118,6 +160,15 @@ class BedrockKbStack(Stack):
         self.collection.add_dependency(encryption_policy)
         self.collection.add_dependency(network_policy)
         self.collection.add_dependency(data_access_policy)
+
+        # Now that self.collection.attr_arn is resolvable as a CDK token,
+        # scope the index-creator Lambda's data-plane permission to this
+        # specific collection ARN rather than the broader collection/*.
+        index_fn.add_to_role_policy(iam.PolicyStatement(
+            sid="AossIndexCreatorDataPlane",
+            actions=["aoss:APIAccessAll"],
+            resources=[self.collection.attr_arn],
+        ))
 
         # --- Create the vector index (must exist before the KB) --------------
         index_provider = cr.Provider(

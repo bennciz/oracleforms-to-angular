@@ -21,6 +21,15 @@ from botocore.exceptions import ClientError
 
 REGION  = os.environ.get("AWS_REGION", "us-east-1")
 ACCOUNT = os.environ["CDK_DEFAULT_ACCOUNT"]          # required — set before running
+# The AOSS collection is reachable ONLY via this VPC endpoint — public access is disabled.
+# The endpoint is provisioned by BedrockKbStack (CDK) and must be supplied here before
+# running this script.  Failing without it is intentional (fail-closed security posture).
+VPCE = os.environ.get("KB_VPC_ENDPOINT_ID")
+if not VPCE:
+    raise SystemExit(
+        "Set KB_VPC_ENDPOINT_ID to an OpenSearch Serverless VPC endpoint id; "
+        "public access is intentionally not supported."
+    )
 # Bucket name pattern: oracle-modernization-kb-<account>-<region>
 # The bucket is created by StorageStack; set it explicitly via env var if needed.
 BUCKET  = os.environ.get("KB_BUCKET", f"oracle-modernization-kb-{ACCOUNT}-{REGION}")
@@ -74,13 +83,34 @@ def ensure_role() -> str:
          "Resource": [f"arn:aws:s3:::{BUCKET}", f"arn:aws:s3:::{BUCKET}/*"]},
         {"Sid": "Embed", "Effect": "Allow",
          "Action": ["bedrock:InvokeModel"], "Resource": [EMBED_MODEL]},
+        # Interim scope: account+region-bounded until the collection ARN is
+        # known.  main() calls _patch_role_aoss_scope() to tighten this to
+        # the specific collection ARN once ensure_collection() has run.
         {"Sid": "AOSS", "Effect": "Allow",
-         "Action": ["aoss:APIAccessAll"], "Resource": ["*"]},
+         "Action": ["aoss:APIAccessAll"],
+         "Resource": [f"arn:aws:aoss:{REGION}:{ACCOUNT}:collection/*"]},
     ]}
     iam.put_role_policy(RoleName=ROLE_NAME, PolicyName="kb-access",
                         PolicyDocument=json.dumps(policy))
     ids["role_arn"] = arn; save()
     return arn
+
+
+def _patch_role_aoss_scope(collection_arn: str):
+    """Re-apply the inline policy with AOSS resource pinned to the specific collection ARN."""
+    policy = {"Version": "2012-10-17", "Statement": [
+        {"Sid": "S3Read", "Effect": "Allow",
+         "Action": ["s3:GetObject", "s3:ListBucket"],
+         "Resource": [f"arn:aws:s3:::{BUCKET}", f"arn:aws:s3:::{BUCKET}/*"]},
+        {"Sid": "Embed", "Effect": "Allow",
+         "Action": ["bedrock:InvokeModel"], "Resource": [EMBED_MODEL]},
+        # Scoped to the specific collection ARN now that it is known.
+        {"Sid": "AOSS", "Effect": "Allow",
+         "Action": ["aoss:APIAccessAll"], "Resource": [collection_arn]},
+    ]}
+    iam.put_role_policy(RoleName=ROLE_NAME, PolicyName="kb-access",
+                        PolicyDocument=json.dumps(policy))
+    log(f"patched role AOSS resource scope to {collection_arn}")
 
 
 # ---- 2. AOSS policies --------------------------------------------------------
@@ -95,9 +125,12 @@ def ensure_aoss_policies(role_arn: str):
            "AWSOwnedKey": True}
     _put_aoss("encryption", enc)
 
+    # Collection is reachable only via the VPC endpoint — AllowFromPublic is False.
+    # SourceVPCEs restricts access to the endpoint provisioned by BedrockKbStack.
     net = [{"Rules": [{"ResourceType": "collection", "Resource": [f"collection/{COLL}"]},
                       {"ResourceType": "dashboard", "Resource": [f"collection/{COLL}"]}],
-            "AllowFromPublic": True}]
+            "AllowFromPublic": False,
+            "SourceVPCEs": [VPCE]}]
     _put_aoss("network", net)
 
     access = [{"Rules": [
@@ -229,6 +262,9 @@ def main():
     log("waiting 12s for IAM propagation..."); time.sleep(12)
     ensure_aoss_policies(role_arn)
     coll_arn, endpoint = ensure_collection()
+    # Now that the collection ARN is known, tighten the role policy to the
+    # specific collection ARN (least-privilege upgrade from collection/*).
+    _patch_role_aoss_scope(coll_arn)
     ensure_index(endpoint)
     kb_id = ensure_kb(role_arn, coll_arn)
     ingest(kb_id, ids["data_source_id"])

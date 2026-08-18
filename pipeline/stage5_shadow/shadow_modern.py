@@ -22,10 +22,13 @@ def modern(cid, body):
     # + a dry POST is avoided by testing validations that reject; clean cases we
     # confirm via 201 or (if already present from a prior run) treat dup as noise.
     data = json.dumps(body).encode()
-    req = urllib.request.Request(f"{BASE}/api/accounts", data=data,
+    _url = f"{BASE}/api/accounts"
+    if urllib.parse.urlparse(_url).scheme not in ("https", "http"):
+        raise ValueError(f"Unsafe URL scheme in CF_DOMAIN: {_url}")
+    req = urllib.request.Request(_url, data=data,
                                  headers={"Content-Type":"application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=25) as r:
+        with urllib.request.urlopen(req, timeout=25) as r:  # nosec B310 - scheme validated above; BASE is constructed with hardcoded https:// prefix
             return "PASS", []   # 201 created
     except urllib.error.HTTPError as e:
         if e.code == 400:
